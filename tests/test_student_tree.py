@@ -3,14 +3,20 @@ import unittest
 
 import torch
 
-from eagle.model import student_tree
-from tests.tree_reference import build_tree_mask_and_positions
+from eagle.model.student_tree import build_tree_mask_and_positions
+from tests.tree_reference import build_tree_mask_and_positions as reference
 
 
 class TreeMaskTests(unittest.TestCase):
-    def test_student_default_is_todo(self):
-        with self.assertRaisesRegex(NotImplementedError, "Implement EAGLE"):
-            student_tree.build_tree_mask_and_positions([0], 1)
+    def test_default_matches_upstream_reference(self):
+        rng = random.Random(7)
+        for count in (0, 1, 3, 15, 59):
+            parents = [rng.randrange(i + 1) for i in range(count)]
+            actual = build_tree_mask_and_positions(parents, count)
+            expected = reference(parents, count)
+            for result, original in zip(actual, expected):
+                self.assertEqual(result.dtype, original.dtype)
+                self.assertTrue(torch.equal(result, original))
 
     def test_branching_example_and_no_sibling_leakage(self):
         mask, positions = build_tree_mask_and_positions([0, 0, 1], 3)

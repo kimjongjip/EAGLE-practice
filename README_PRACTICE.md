@@ -1,9 +1,9 @@
 # On-Device AI 실습: EAGLE-3 + Qwen3
 
-공식 EAGLE의 drafter와 generation loop를 사용하면서, **실제 draft tree의
-attention mask와 position IDs를 만드는 함수 하나**를 학생이 구현하는 실습입니다.
-기본 `student_tree.py`는 TODO입니다. Import와 모델 로딩은 가능하며, 학생 함수를
-연결하기 전 `eagenerate()`를 실행하면 첫 draft tree 구성 시 `NotImplementedError`가 발생합니다.
+공식 EAGLE의 drafter와 generation loop를 사용하는 Speculative Decoding 실습입니다.
+Tree Mask는 별도 구현 과제가 아닙니다. `student_tree.py`에 tree attention mask와
+relative position IDs의 기본 구현이 포함되어 있어, 모델 로딩 후 바로
+`eagenerate()`를 실행할 수 있습니다. 함수 대입이나 별도 구현 셀은 필요하지 않습니다.
 
 ## 1. Colab 시작 — 기본 패키지 사용
 
@@ -20,6 +20,18 @@ import sys
 sys.path.insert(0, "/content/EAGLE-practice")
 
 from eagle.model.ea_model import EaModel
+```
+
+이미 이전 버전을 clone하고 import한 Colab 세션이라면 다음 셀로 업데이트합니다.
+기존에 연결한 임시 함수도 저장소의 기본 구현으로 돌아갑니다.
+`cnets.py`가 모듈을 통해 함수를 호출하므로 로딩된 모델을 다시 다운로드할 필요는 없습니다.
+
+```python
+!git -C /content/EAGLE-practice pull --ff-only
+
+import importlib
+import eagle.model.student_tree as student_tree
+importlib.reload(student_tree)
 ```
 
 환경 확인은 설치 없이 가능합니다.
@@ -67,16 +79,19 @@ eagle_model = EaModel.from_pretrained(
 ).eval()
 ```
 
-이 단계에서는 학생 함수를 호출하지 않습니다. 첫 실행에는 Hugging Face에서
+이 단계에서는 tree mask를 구성하지 않습니다. 첫 실행에는 Hugging Face에서
 모델을 다운로드합니다. 라이브러리 설치와 모델 다운로드는 별개입니다.
 명시적인 단일 GPU 배치를 사용합니다. Colab T4는 float16을, BF16 지원 GPU는
 bfloat16을 사용합니다. 이번 검증의 BF16 peak GPU 할당량은 약 8.72 GiB였으며,
 실제 메모리 사용량은 GPU, dtype, prefix 길이와 tree 크기에 따라 달라집니다.
 
 `total_token=16`은 기존 구현에서 anchor를 포함한 tree budget입니다.
-학생 함수에 전달되는 `total_tokens`는 anchor를 제외하므로 여기서는 15입니다.
+Tree 함수에 전달되는 `total_tokens`는 anchor를 제외하므로 여기서는 15입니다.
 
-## 3. 학생이 구현할 함수
+## 3. 기본 tree mask 구현
+
+다음 함수는 `eagle/model/student_tree.py`에 구현되어 있습니다. 파일 이름과
+호출 API는 기존 코드와의 호환성을 위해 유지합니다.
 
 정확한 signature:
 
@@ -102,7 +117,7 @@ def build_tree_mask_and_positions(mask_index_list, total_tokens, device=None):
 
 `N = total_tokens`입니다. Attention 내부의 0/-inf additive mask와 구별하세요.
 Prefix 길이를 position에 더하는 작업은 공식 `tree_decoding()`이 수행합니다.
-학생 함수에서는 상대적인 depth만 반환합니다.
+Tree 함수에서는 상대적인 depth만 반환합니다.
 
 예를 들어 부모 목록 `[0, 0, 1]`은 root의 자식 1·2와 node 1의 자식 3을 뜻합니다.
 기대 mask와 position은 다음과 같습니다.
@@ -116,26 +131,15 @@ Prefix 길이를 position에 더하는 작업은 공식 `tree_decoding()`이 수
 [0, 1, 1, 2]
 ```
 
-다음 셀에 자신의 구현을 작성하고 연결합니다. 구현을 바꿀 때에는 셀을 다시
-실행하면 됩니다. 파일 수정, 모델 재로딩, `importlib.reload()`는 필요하지 않습니다.
+원래 CPU에서 mask를 구성하던 동작을 유지하기 위해 `cnets.py`는
+`device="cpu"`로 호출합니다. 반환된 position은 기존 코드가 target device로
+옮깁니다. 기본 함수는 전달된 `device`를 사용해 tensor를 생성합니다.
+
+모델 다운로드 없이 기본 구현을 점검하는 셀:
 
 ```python
 import eagle.model.student_tree as student_tree
 
-def my_build_tree_mask_and_positions(mask_index_list, total_tokens, device=None):
-    # TODO: 위 계약을 만족하는 두 torch.Tensor를 구현하세요.
-    raise NotImplementedError("학생 구현")
-
-student_tree.build_tree_mask_and_positions = my_build_tree_mask_and_positions
-```
-
-원래 CPU에서 mask를 구성하던 동작을 유지하기 위해 `cnets.py`는
-`device="cpu"`로 호출합니다. 반환된 position은 기존 코드가 target device로
-옮깁니다. 자신의 함수에서는 전달된 `device`를 사용해 tensor를 생성하세요.
-
-모델 다운로드 없이 자신의 구현을 점검하는 셀:
-
-```python
 mask, positions = student_tree.build_tree_mask_and_positions([0, 0, 1], 3, device="cpu")
 expected = torch.tensor([
     [1, 0, 0, 0],
@@ -153,7 +157,7 @@ assert mask[0, 0, 3, 2] == 0  # 다른 branch가 보이면 안 됩니다.
 
 ## 4. 실제 EAGLE 생성
 
-학생 구현을 연결한 뒤 실행합니다.
+모델 로딩 후 바로 실행합니다.
 
 ```python
 tokenizer = eagle_model.get_tokenizer()
@@ -199,12 +203,13 @@ EaModel.from_pretrained()                 target·drafter 로딩, init_tree()
 
 `cnets.py`의 부모 목록 계산 다음에 있던 identity/root mask 초기화,
 부모 mask 누적, row sum에서 depth 계산, float32·4D 변환을 함수 경계로 추출했습니다.
-원래 구현은 강사용 `tests/tree_reference.py`에 보존했습니다. Core inference는
-이 reference를 자동으로 import하거나 대신 실행하지 않습니다.
+기본 구현은 부모 visibility를 boolean OR로 누적합니다. 원래 구현은
+`tests/tree_reference.py`에 보존하여 기본 구현과의 출력 일치를 검증합니다.
+Core inference는 `student_tree.py`의 기본 구현을 사용합니다.
 
 `utils.py`의 `tree_decoding()`, `evaluate_posterior()`, `update_inference_inputs()`,
 `retrieve_indices` 알고리즘, generation loop와 `kv_cache.py`는 유지했습니다.
-학생 hook은 EAGLE-3의 `cnets.py`에만 적용되며 EAGLE-2의 `cnets1.py`는 그대로입니다.
+Tree 함수는 EAGLE-3의 `cnets.py`에서 호출하며 EAGLE-2의 `cnets1.py`는 그대로입니다.
 
 ## 6. 호환성 수정의 근거
 
@@ -254,27 +259,35 @@ python scripts/colab_smoke_test.py
 테스트는 다음을 확인합니다.
 
 - 예제·chain·wide·무작위 tree의 ancestor visibility, sibling leakage, dtype/device.
-- 학생 함수 없이 loading 가능, 실제 generation에서는 TODO 발생.
+- 기본 tree 구현과 원본 reference의 출력 일치, 별도 함수 대입 없이 loading·generation 성공.
 - 로딩 후 monkey-patch와 재대입, 매 round 호출, target의 mask와 absolute RoPE position.
 - 실제 후보 tree의 retrieve 경로, path별 순차 forward와 tree verification logits 일치.
 - 공식 posterior·KV 갱신과 다음 round, EAGLE/AR greedy token 일치.
 - 설치된 HF Qwen3와 target logits 일치, decorator/typing 호환성.
 - UI·평가 패키지 없이 새 Python process에서 core와 Qwen3 import.
 
-실제 4B 가중치로 강사용 reference를 명시적으로 연결하는 smoke test:
+실제 4B 가중치와 저장소의 기본 tree 구현을 사용하는 smoke test:
 
 ```bash
-python scripts/colab_smoke_test.py --full --reference-tree
+python scripts/colab_smoke_test.py --full
 ```
 
 기본 `python scripts/colab_smoke_test.py`는 import만 확인하며 다운로드하지 않습니다.
 Full test는 CUDA를 사용해 모델을 로딩하고 8 토큰 budget으로 생성한 뒤 기존
-`naivegenerate()`와 공통 구간의 greedy token을 비교합니다. 생성 중 reference의
-실제 호출 횟수도 확인합니다. 실행 후 원래 TODO 함수를 복원합니다.
-별도 Python 모듈에 학생 구현이 있다면 `--student-module 모듈이름`을 사용할 수 있습니다.
+`naivegenerate()`와 공통 구간의 greedy token을 비교합니다. 생성 중 기본 tree 함수의
+호출 횟수도 계측하며 실행 후 계측 wrapper를 제거합니다.
+개발용 비교에는 `--reference-tree`, 별도 구현 비교에는 기존의
+`--student-module 모듈이름` 옵션을 사용할 수 있습니다. 일반 실행에는 두 옵션 모두 필요 없습니다.
 어느 테스트에도 패키지 설치 명령은 없습니다.
 
 ### 실행 기록 (2026-09-05)
+
+기본 tree 구현으로 전환한 뒤에도 Transformers 4.53.3, 4.56.1, 5.16.1에서
+각각 16개 테스트가 통과했습니다. 5.16.1에서는 `--reference-tree` 없이
+`python scripts/colab_smoke_test.py --full`을 실행하여 11 tokens, tree 함수 6회 호출,
+greedy AR 공통 구간 일치와 peak CUDA allocation 8.72 GiB를 확인했습니다.
+
+다음은 최초 호환성 작업에서 reference를 연결해 검증한 기록입니다.
 
 | Transformers | PyTorch | offline unit/integration tests | 4B full smoke |
 | --- | --- | --- | --- |

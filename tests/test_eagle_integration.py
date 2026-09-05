@@ -31,12 +31,13 @@ class EagleIntegrationTests(unittest.TestCase):
         self.model = load_tiny_eagle(self.paths)
         self.prompt = torch.tensor([[1, 4, 7]])
 
-    def test_loading_succeeds_but_first_real_tree_requires_student(self):
+    def test_loading_and_generation_work_without_patch(self):
         self.assertEqual(self.model.ea_layer.midlayer.self_attn.head_dim, 12)
         self.assertEqual(self.model.ea_layer.midlayer.self_attn.rotary_emb.base, 1000000.0)
         self.assertIsNone(self.model.ea_layer.config.rope_scaling)
-        with self.assertRaisesRegex(NotImplementedError, "Implement EAGLE"):
-            self.model.eagenerate(self.prompt, max_new_tokens=8, max_length=64)
+        output = self.model.eagenerate(self.prompt, max_new_tokens=8, max_length=64)
+        self.assertGreater(output.shape[1], self.prompt.shape[1])
+        self.assertTrue(torch.equal(output[:, :self.prompt.shape[1]], self.prompt))
 
     def test_runtime_patch_reaches_target_and_every_generation_round(self):
         calls, verifications = [], []
@@ -116,8 +117,7 @@ class EagleIntegrationTests(unittest.TestCase):
             self.assertTrue(torch.all(lengths == result[0].shape[1]))
 
     def test_eagle_greedy_matches_official_autoregressive_loop(self):
-        with patch.object(student_tree, "build_tree_mask_and_positions", reference):
-            speculative = self.model.eagenerate(self.prompt, max_new_tokens=8, max_length=64)
+        speculative = self.model.eagenerate(self.prompt, max_new_tokens=8, max_length=64)
         baseline = self.model.naivegenerate(self.prompt, max_new_tokens=8, max_length=64)
         # Upstream EAGLE checks the limit after accepting an entire branch.
         length = min(speculative.shape[1], baseline.shape[1])

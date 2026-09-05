@@ -1,1 +1,1 @@
-"""Offline regression tests; reference answers here are for instructors."""
+"""Offline regression tests and upstream reference fixtures."""

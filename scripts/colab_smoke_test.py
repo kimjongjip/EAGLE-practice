@@ -1,7 +1,7 @@
 """Import check by default; --full downloads and runs Qwen3-4B + EAGLE-3.
 
-No installation commands. Instructor regression:
-    python scripts/colab_smoke_test.py --full --reference-tree
+No installation commands. Full inference uses the built-in tree builder:
+    python scripts/colab_smoke_test.py --full
 """
 
 import argparse
@@ -17,7 +17,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--full", action="store_true", help="Download the models and generate a short answer on CUDA")
     tree = parser.add_mutually_exclusive_group()
-    tree.add_argument("--reference-tree", action="store_true", help="Instructor only: explicitly enable the test fixture")
+    tree.add_argument("--reference-tree", action="store_true", help="Optional regression against the upstream test fixture")
     tree.add_argument("--student-module", help="Import build_tree_mask_and_positions from this Python module")
     parser.add_argument("--base-model", default="Qwen/Qwen3-4B")
     parser.add_argument("--drafter", default="AngelSlim/Qwen3-4B_eagle3")
@@ -39,8 +39,6 @@ def main():
         parser.error("Full smoke test needs a CUDA GPU; select a GPU runtime in Colab.")
     if args.max_new_tokens < 1:
         parser.error("--max-new-tokens must be positive")
-    if not args.reference_tree and not args.student_module:
-        parser.error("Use --student-module MODULE or the instructor-only --reference-tree for full generation.")
 
     dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     # Explicit single-GPU placement avoids automatic CPU/disk offloading.
@@ -51,18 +49,20 @@ def main():
         torch_dtype=dtype, device_map={"": "cuda:0"},
         attn_implementation="eager",
     ).eval()
-    print("Model loading with the student TODO still in place: OK", flush=True)
+    print("Model loading: OK", flush=True)
 
     from eagle.model import student_tree
     if args.reference_tree:
         from tests.tree_reference import build_tree_mask_and_positions
-    else:
+    elif args.student_module:
         build_tree_mask_and_positions = importlib.import_module(args.student_module).build_tree_mask_and_positions
+    else:
+        build_tree_mask_and_positions = student_tree.build_tree_mask_and_positions
 
     original = student_tree.build_tree_mask_and_positions
     calls = 0
 
-    def counted_student(parents, count, device=None):
+    def counted_tree_builder(parents, count, device=None):
         nonlocal calls
         calls += 1
         return build_tree_mask_and_positions(parents, count, device)
@@ -75,13 +75,13 @@ def main():
     input_ids = tokenizer(prompt, return_tensors="pt", add_special_tokens=False).input_ids.to("cuda:0")
     max_length = max(256, input_ids.shape[1] + args.max_new_tokens + 64)
     try:
-        student_tree.build_tree_mask_and_positions = counted_student
+        student_tree.build_tree_mask_and_positions = counted_tree_builder
         output = model.eagenerate(
             input_ids, temperature=0.0, max_new_tokens=args.max_new_tokens, max_length=max_length,
         )
     finally:
         student_tree.build_tree_mask_and_positions = original
-    assert calls >= 2, "Student function must run during initialization and the following round"
+    assert calls >= 2, "Tree builder must run during initialization and the following round"
     assert output.shape[1] > input_ids.shape[1], "No tokens generated"
     assert torch.equal(output[:, :input_ids.shape[1]], input_ids), "Prompt was changed"
     baseline = model.naivegenerate(

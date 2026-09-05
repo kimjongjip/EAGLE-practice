@@ -1,6 +1,6 @@
-"""Instructor/test fixture: the original cnets.py tree construction.
+"""Regression fixture: the original cnets.py tree construction.
 
-Never imported by core inference. The student module intentionally has no answer.
+Never imported by core inference; used to check the default tree builder.
 """
 
 import torch
