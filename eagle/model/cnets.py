@@ -29,6 +29,7 @@ from torch import nn
 
 from transformers.activations import ACT2FN
 from huggingface_hub import hf_hub_download
+from . import student_tree
 
 
 try:
@@ -196,12 +197,12 @@ class LlamaAttention(nn.Module):
         self.config = config
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
-        self.head_dim = self.hidden_size // self.num_heads
+        self.head_dim = getattr(config, "head_dim", self.hidden_size // self.num_heads)
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.max_position_embeddings = config.max_position_embeddings
 
-        if (self.head_dim * self.num_heads) != self.hidden_size:
+        if not hasattr(config, "head_dim") and (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
                 f" and `num_heads`: {self.num_heads})."
@@ -318,11 +319,11 @@ class LlamaAttention(nn.Module):
             )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+        attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.head_dim)
 
         if self.config.pretraining_tp > 1:
-            attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
-            o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
+            attn_output = attn_output.split(self.num_heads * self.head_dim // self.config.pretraining_tp, dim=2)
+            o_proj_slices = self.o_proj.weight.split(self.num_heads * self.head_dim // self.config.pretraining_tp, dim=1)
             attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
         else:
             attn_output = self.o_proj(attn_output)
@@ -772,16 +773,11 @@ class Model(nn.Module):
         mask_index[draft_parents == 0] = -1
         mask_index = mask_index + 1
         mask_index_list = mask_index.tolist()
-        # with Timer("mask"):
-        tree_mask = torch.eye(total_tokens + 1).bool()
-        tree_mask[:, 0] = True
-        for i in range(total_tokens):
-            tree_mask[i + 1].add_(tree_mask[mask_index_list[i]])
-
-
-        tree_position_ids = torch.sum(tree_mask, dim=1) - 1
-
-        tree_mask = tree_mask.float()[None, None]
+        # Keep the original CPU construction; positions move to the model
+        # device below, after the unchanged retrieve_indices construction.
+        tree_mask, tree_position_ids = student_tree.build_tree_mask_and_positions(
+            mask_index_list, total_tokens, device="cpu"
+        )
         draft_tokens = draft_tokens[None]
 
         del parents_list, scores_list, ss_token, ss_token_list, draft_parents

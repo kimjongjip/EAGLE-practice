@@ -115,6 +115,11 @@ class EConfig(PretrainedConfig):
         self.rope_scaling = rope_scaling
         self._rope_scaling_validation()
 
+        # HF normalization can mutate this dict in place. Keep the validated
+        # legacy value intact for the drafter below.
+        if rope_scaling is not None:
+            self.rope_scaling = rope_scaling.copy()
+
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
@@ -122,6 +127,12 @@ class EConfig(PretrainedConfig):
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,
         )
+
+        # HF may normalize these legacy fields into rope_parameters. The EAGLE
+        # drafter implements its own RoPE and must retain the checkpoint values.
+        self.rope_scaling = rope_scaling
+        if "rope_theta" in kwargs:
+            self.rope_theta = kwargs["rope_theta"]
 
     def _rope_scaling_validation(self):
         """

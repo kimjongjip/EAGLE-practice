@@ -9,11 +9,6 @@ from transformers import AutoTokenizer
 import os
 from transformers import PreTrainedModel, PretrainedConfig, AutoConfig
 
-from .modeling_llama_kv import LlamaForCausalLM as KVLlamaForCausalLM
-from .modeling_mixtral_kv import MixtralForCausalLM as KVMixtralForCausalLM
-#from .modeling_qwen2_kv import LlamaForCausalLM as KVQwen2ForCausalLM
-from .modeling_qwen2_kv import Qwen2ForCausalLM as KVQwen2ForCausalLM
-from .modeling_qwen3_kv import Qwen3ForCausalLM as KVQwen3ForCausalLM
 from .utils import *
 from .kv_cache import initialize_past_key_values
 
@@ -101,18 +96,26 @@ class EaModel(nn.Module):
         Type = AutoConfig.from_pretrained(base_model_path).architectures[0]
 
         if Type == 'LlamaForCausalLM':
+            from .modeling_llama_kv import LlamaForCausalLM as KVLlamaForCausalLM
+
             base_model = KVLlamaForCausalLM.from_pretrained(
                 base_model_path, **kwargs
             )
         elif Type == 'Qwen2ForCausalLM':
+            from .modeling_qwen2_kv import Qwen2ForCausalLM as KVQwen2ForCausalLM
+
             base_model = KVQwen2ForCausalLM.from_pretrained(
                 base_model_path, **kwargs
             )
         elif Type == 'Qwen3ForCausalLM':
+            from .modeling_qwen3_kv import Qwen3ForCausalLM as KVQwen3ForCausalLM
+
             base_model = KVQwen3ForCausalLM.from_pretrained(
                 base_model_path, **kwargs
             )
         else:
+            from .modeling_mixtral_kv import MixtralForCausalLM as KVMixtralForCausalLM
+
             base_model = KVMixtralForCausalLM.from_pretrained(
                 base_model_path, **kwargs
             )

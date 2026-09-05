@@ -28,7 +28,6 @@ from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.generation import GenerationMixin
 from transformers.integrations import use_kernel_forward_from_hub
-from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import (
@@ -38,12 +37,22 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutputWithPast,
     TokenClassifierOutput,
 )
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
-from transformers.processing_utils import Unpack
-from transformers.utils import LossKwargs, auto_docstring, can_return_tuple, logging
+from transformers.utils import logging
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 
+from .hf_compat import (
+    KwargsForCausalLM,
+    Unpack,
+    auto_docstring,
+    can_return_tuple,
+    causal_lm_tied_weights_keys,
+    create_causal_mask,
+    create_sliding_window_causal_mask,
+    dynamic_rope_update,
+    initialize_qwen3_rope,
+    qwen3_rope_init,
+)
 
 logger = logging.get_logger(__name__)
 
@@ -381,25 +390,22 @@ class Qwen3PreTrainedModel(PreTrainedModel):
                 module.weight.data[module.padding_idx].zero_()
         elif isinstance(module, Qwen3RMSNorm):
             module.weight.data.fill_(1.0)
+        elif isinstance(module, Qwen3RotaryEmbedding):
+            initialize_qwen3_rope(module)
 
 
 class Qwen3RotaryEmbedding(nn.Module):
     def __init__(self, config: Qwen3Config, device=None):
         super().__init__()
-        # BC: "rope_type" was originally "type"
-        if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
-            self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
-        else:
-            self.rope_type = "default"
+        self.rope_type, self.rope_init_fn = qwen3_rope_init(config)
         self.max_seq_len_cached = config.max_position_embeddings
         self.original_max_seq_len = config.max_position_embeddings
 
         self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
 
         inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self.original_inv_freq = self.inv_freq
+        self.register_buffer("original_inv_freq", inv_freq.clone(), persistent=False)
 
     @torch.no_grad()
     @dynamic_rope_update  # power user: used with advanced RoPE types (e.g. dynamic rope)
@@ -492,6 +498,10 @@ class Qwen3Model(Qwen3PreTrainedModel):
         cache_position: Optional[torch.LongTensor] = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> BaseModelOutputWithPast:
+        """
+        cache_position (`torch.LongTensor`, *optional*):
+            Compatibility argument; EAGLE tracks cache lengths in its KVCache objects.
+        """
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -616,12 +626,9 @@ class Qwen3Model(Qwen3PreTrainedModel):
         )
 
 
-class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
-
-
 @auto_docstring
 class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
-    _tied_weights_keys = ["lm_head.weight"]
+    _tied_weights_keys = causal_lm_tied_weights_keys()
     _tp_plan = {"lm_head": "colwise_rep"}
     _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
 
@@ -670,6 +677,8 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         **kwargs: Unpack[KwargsForCausalLM],
     ) -> CausalLMOutputWithPast:
         r"""
+        cache_position (`torch.LongTensor`, *optional*):
+            Compatibility argument; EAGLE tracks cache lengths in its KVCache objects.
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
             Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
             config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
